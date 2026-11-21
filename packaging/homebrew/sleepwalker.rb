@@ -8,7 +8,6 @@ class Sleepwalker < Formula
   license "MIT"
 
   depends_on :macos
-  depends_on "jq"
 
   def install
     # swk finds the daemon at <prefix>/libexec, next to <prefix>/bin

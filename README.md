@@ -99,6 +99,13 @@ All set from the command line (`swk config set <key> <value>`), stored in `~/.co
 - **Battery saver**: Low Power Mode + `taskpolicy -b` (background priority) on the apps in your throttle list and on any other process above `cpu_throttle`% CPU. The agent's whole process tree, its parents, your terminal and the agent's app are never touched. Everything is reverted when the condition ends — Low Power Mode is only turned off if swk turned it on.
 - The daemon is a root-owned copy in `/usr/local/libexec/sleepwalker`; it reads your config as plain validated values and never executes files from your home folder.
 
+## Security
+
+- **Zero third-party dependencies.** Plain Bash plus tools that ship with macOS (`pmset`, `launchctl`, `taskpolicy`, `ioreg`, `ps`, `sed`, `awk`, `osascript`). No package manager pulls anything at install or run time — nothing upstream to compromise.
+- **Smallest possible root surface.** One sudoers line allows only `sleepwalker-root start|stop`. Both root scripts are copied to `/usr/local/libexec/sleepwalker`, owned by root, and never read code from your home folder.
+- **Config is data, not code.** The daemon parses `~/.config/sleepwalker/config` line by line and validates every value (numbers, `on|off`, or names limited to `[A-Za-z0-9 ._+-]`); it never `source`s it.
+- Short enough to audit in one sitting: `bin/swk`, `libexec/sleepwalker-daemon`, `libexec/sleepwalker-root`.
+
 ## Caveats
 
 - **Heat.** A closed Mac in a bag can't breathe. The thermal guard covers extremes, but prefer light work on the move (specs, edits, reviews) over long builds.

@@ -257,7 +257,11 @@ cmd_throttle() {
 }
 
 # called by agent hooks; Claude Code passes JSON with session_id on stdin
-session_id() { local s=""; [ -t 0 ] || s=$( (command -v jq >/dev/null && jq -r '.session_id // empty') 2>/dev/null || true); echo "${s:-manual}"; }
+session_id() {
+  local s=""
+  [ -t 0 ] || s=$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._-]*\)".*/\1/p' | head -1)
+  echo "${s:-manual}"
+}
 cmd_hook() {
   mkdir -p "$STATE_DIR/holds"
   case "${1:-}" in
@@ -271,25 +275,37 @@ cmd_integrate() {
   local target=${1:-} print=0; [ "${2:-}" = --print ] && print=1
   [ "$target" = claude ] || die "usage: swk integrate claude [--print]   (other agents: see docs/other-agents.md)"
   local bin; bin=$(command -v swk || echo "$SELF")
-  local snippet
-  snippet=$(cat <<EOF
-{"hooks":{
-  "UserPromptSubmit":[{"hooks":[{"type":"command","command":"$bin hook start 2>/dev/null || true","timeout":5}]}],
-  "Stop":[{"hooks":[{"type":"command","command":"$bin hook stop 2>/dev/null || true","timeout":5}]}],
-  "SessionEnd":[{"hooks":[{"type":"command","command":"$bin hook stop 2>/dev/null || true","timeout":5}]}]
-}}
+  if [ $print = 1 ]; then
+    cat <<EOF
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "$bin hook start 2>/dev/null || true", "timeout": 5 }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "$bin hook stop 2>/dev/null || true", "timeout": 5 }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "$bin hook stop 2>/dev/null || true", "timeout": 5 }] }]
+  }
+}
 EOF
-)
-  if [ $print = 1 ]; then echo "$snippet" | jq .; return; fi
-  command -v jq >/dev/null || die "jq is required (brew install jq) — or use: swk integrate claude --print"
+    return
+  fi
   local f="$HOME/.claude/settings.json"; mkdir -p "$HOME/.claude"; [ -f "$f" ] || echo '{}' > "$f"
   cp "$f" "$f.bak-sleepwalker"
-  # drop previous swk hooks, then append ours (idempotent)
-  jq --argjson s "$snippet" '
-    .hooks = (.hooks // {}) |
-    reduce ("UserPromptSubmit","Stop","SessionEnd") as $e (.;
-      .hooks[$e] = ([(.hooks[$e] // [])[] | select(([.hooks[]?.command] | map(test("swk hook")) | any) | not)] + $s.hooks[$e]))
-  ' "$f.bak-sleepwalker" > "$f"
+  # JSON merge with macOS's built-in JavaScript (no third-party deps):
+  # drop previous swk hooks, append ours — safe to run twice
+  osascript -l JavaScript - "$f" "$bin" >/dev/null <<'EOF' || die "could not update $f (backup kept at $f.bak-sleepwalker)"
+ObjC.import('Foundation');
+function run(argv) {
+  const [path, bin] = argv;
+  const raw = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, null);
+  const cfg = JSON.parse((raw.isNil() ? '' : ObjC.unwrap(raw)) || '{}');
+  cfg.hooks = cfg.hooks || {};
+  const hook = (c) => ({ hooks: [{ type: 'command', command: `${bin} hook ${c} 2>/dev/null || true`, timeout: 5 }] });
+  for (const [event, c] of [['UserPromptSubmit', 'start'], ['Stop', 'stop'], ['SessionEnd', 'stop']]) {
+    const keep = (cfg.hooks[event] || []).filter((g) => !(g.hooks || []).some((h) => /swk hook/.test(h.command || '')));
+    cfg.hooks[event] = keep.concat([hook(c)]);
+  }
+  $(JSON.stringify(cfg, null, 2) + '\n').writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null);
+}
+EOF
   ok "Claude Code hooks added to $f (backup: $f.bak-sleepwalker)"
 }
 

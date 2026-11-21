@@ -1,0 +1,41 @@
+#!/bin/bash
+# The only part of sleepwalker that runs as root. Installed by `swk setup`;
+# sudoers allows exactly "sleepwalker-root start|stop" with no password, so the
+# agent (and you, from your phone, through the agent) can toggle it.
+# It never executes anything from the user's folders.
+set -e
+LABEL=dev.sleepwalker.daemon
+PLIST=/Library/LaunchDaemons/$LABEL.plist
+DAEMON=/usr/local/libexec/sleepwalker/sleepwalker-daemon
+ST=/var/db/sleepwalker
+
+case "$1" in
+  start)
+    cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key><array><string>$DAEMON</string></array>
+  <key>StartInterval</key><integer>10</integer>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+EOF
+    chown root:wheel "$PLIST"; chmod 644 "$PLIST"
+    launchctl bootout system/$LABEL 2>/dev/null || true
+    launchctl bootstrap system "$PLIST"
+    ;;
+  stop)
+    launchctl bootout system/$LABEL 2>/dev/null || true
+    rm -f "$PLIST"
+    pmset -a disablesleep 0
+    if [ -f "$ST/lpm" ]; then pmset -a lowpowermode 0; fi
+    if [ -f "$ST/pids" ]; then
+      sort -u "$ST/pids" | while read -r pid; do taskpolicy -B -p "$pid" 2>/dev/null || true; done
+    fi
+    rm -f "$ST/lpm" "$ST/lpm-user-off" "$ST/pids" "$ST/state"
+    ;;
+  *) echo "usage: sleepwalker-root start|stop" >&2; exit 1 ;;
+esac

@@ -1,0 +1,129 @@
+#!/bin/bash
+# sleepwalker daemon — runs as root every 10s (launchd).
+# @HOME@ and @UID@ are filled in by `swk setup`. Settings are read on every run
+# from the user's config file and validated; nothing from it is ever executed.
+#
+# Stay awake (even with the lid closed) while the agent is present and:
+#   working (hooks) or active in the last idle_min minutes (hooks or CPU), and
+#   on AC — or on battery with battery=on, above battery_min %, online
+#   (offline_grace minutes of tolerance to hop to a hotspot).
+# Otherwise normal sleep comes back; with the lid closed the Mac sleeps right away.
+
+USER_HOME="@HOME@"
+USER_UID="@UID@"
+CONF="$USER_HOME/.config/sleepwalker/config"
+THROTTLE="$USER_HOME/.config/sleepwalker/throttle.txt"
+HOLDS="$USER_HOME/.local/state/sleepwalker/holds"
+LAST="$USER_HOME/.local/state/sleepwalker/last-activity"
+ST=/var/db/sleepwalker
+/bin/mkdir -p "$ST"
+
+# read a setting: text limited to safe characters, numbers must be numbers
+cfg() {
+  local v; v=$(/usr/bin/sed -n "s/^$1=//p" "$CONF" 2>/dev/null | /usr/bin/tail -1)
+  [[ "$v" =~ ^[A-Za-z0-9\ ._+-]*$ ]] || v=""
+  echo "${v:-$2}"
+}
+num() { local v; v=$(cfg "$1" "$2"); [[ "$v" =~ ^[0-9]+$ ]] && echo "$v" || echo "$2"; }
+
+AGENT=$(cfg agent claude)
+APP=$(cfg app "")
+TERMINAL=$(cfg terminal "")
+BATTERY=$(cfg battery off)
+IDLE_MIN=$(num idle_min 30)
+BATTERY_MIN=$(num battery_min 15)
+OFFLINE_GRACE=$(num offline_grace 5)
+CPU_THROTTLE=$(num cpu_throttle 20)
+ACTIVE_CPU=$(num active_cpu 0)
+LOW_POWER=$(cfg low_power on)
+THROTTLE_ON=$(cfg throttle on)
+
+batt=$(/usr/bin/pmset -g batt)
+pct=$(echo "$batt" | /usr/bin/grep -o '[0-9]*%' | /usr/bin/head -1 | /usr/bin/tr -d %)
+on_ac() { echo "$batt" | /usr/bin/grep -q "AC Power"; }
+online() {
+  if /sbin/route -n get default >/dev/null 2>&1; then /bin/rm -f "$ST/offline"; return 0; fi
+  [ -f "$ST/offline" ] || /usr/bin/touch "$ST/offline"
+  ! /usr/bin/find "$ST/offline" -mmin +"$OFFLINE_GRACE" | /usr/bin/grep -q .
+}
+
+# one pass over the process table: is the agent (CLI or desktop app) there,
+# how much CPU is it using, and which pids are protected from throttling
+# (agent tree, its parents, the configured terminal and desktop app)
+PS=$(/bin/ps -Ao pid=,ppid=,uid=,pcpu=,comm=)
+SCAN=$(echo "$PS" | /usr/bin/awk -v agent="$AGENT" -v app="$APP" -v term="$TERMINAL" -v uid="$USER_UID" -v lim="$CPU_THROTTLE" '
+  { pid[NR]=$1; pp[$1]=$2; u[$1]=$3; cpu[$1]=$4; c=$5; for(i=6;i<=NF;i++) c=c" "$i; cmd[$1]=c; kids[$2]=kids[$2]" "$1 }
+  function inapp(p, name) { return name != "" && index(cmd[p], "/Applications/" name ".app/") > 0 }
+  END {
+    for (k=1; k<=NR; k++) {
+      p=pid[k]; n=cmd[p]; sub(/.*\//,"",n)
+      if (n==agent || inapp(p, app)) { present=1; q[++t]=p; for (a=pp[p]; a>1; a=pp[a]) keep[a]=1 }
+      if (inapp(p, term)) keep[p]=1
+    }
+    while (h<t) { p=q[++h]; if (!(p in tree)) { tree[p]=1; keep[p]=1; m=split(kids[p], ch, " "); for (j=1;j<=m;j++) q[++t]=ch[j] } }
+    for (p in tree) busy+=cpu[p]
+    for (p in keep) print "keep", p
+    printf "present=%d busy=%d\n", present, busy
+    for (k=1; k<=NR; k++) { p=pid[k]; if (u[p]==uid && cpu[p]+0>=lim && !keep[p] && cmd[p] !~ /^\/(System|usr\/libexec|usr\/sbin)\//) print "slow", p }
+  }')
+present=$(echo "$SCAN" | /usr/bin/sed -n 's/^present=\([0-9]*\).*/\1/p')
+busy=$(echo "$SCAN" | /usr/bin/sed -n 's/.*busy=\([0-9]*\).*/\1/p')
+
+# activity: hooks (hold/release) or the agent itself burning CPU (agents without hooks)
+[ "$ACTIVE_CPU" -gt 0 ] && [ "${busy:-0}" -ge "$ACTIVE_CPU" ] && /usr/bin/touch "$ST/cpu-activity"
+working() { /usr/bin/find "$HOLDS" -type f -mmin -360 2>/dev/null | /usr/bin/grep -q .; }
+recent() { /usr/bin/find "$LAST" "$ST/cpu-activity" -mmin -"$IDLE_MIN" 2>/dev/null | /usr/bin/grep -q .; }
+
+want=0
+if [ "$present" = 1 ] && { working || recent; }; then
+  if on_ac; then
+    want=1
+  elif [ "$BATTERY" = on ] && [ "${pct:-0}" -gt "$BATTERY_MIN" ] && online; then
+    want=1
+  fi
+fi
+# thermal guard (think: closed Mac in a backpack)
+if /usr/bin/pmset -g therm | /usr/bin/grep -qiE 'thermal warning level.*[1-9]'; then want=0; fi
+
+cur=$(/usr/bin/pmset -g | /usr/bin/awk '/SleepDisabled/{print $2}')
+[ "$cur" != "$want" ] && /usr/bin/pmset -a disablesleep "$want"
+
+# Awake on battery = save power: Low Power Mode + other apps and heavy processes
+# to background priority. Leaving this state undoes only what sleepwalker did.
+lpm_now=$(/usr/bin/pmset -g | /usr/bin/awk '/lowpowermode/{print $2}')
+if [ "$want" = 1 ] && ! on_ac; then
+  # the user turned Low Power Mode off by hand: respect it until this state ends
+  if [ -f "$ST/lpm" ] && [ "$lpm_now" != 1 ]; then /bin/rm -f "$ST/lpm"; /usr/bin/touch "$ST/lpm-user-off"; fi
+  if [ "$LOW_POWER" = on ] && [ "$lpm_now" != 1 ] && [ ! -f "$ST/lpm-user-off" ]; then
+    /usr/bin/pmset -a lowpowermode 1 && /usr/bin/touch "$ST/lpm"
+  fi
+  if [ "$THROTTLE_ON" = on ] && [ -f "$THROTTLE" ]; then
+    while IFS= read -r a; do
+      case "$a" in ''|\#*) continue ;; esac
+      [[ "$a" =~ ^[A-Za-z0-9\ ._+-]+$ ]] || continue
+      [ "$a" = "$TERMINAL" ] || [ "$a" = "$APP" ] && continue
+      for pid in $(/usr/bin/pgrep -f "/Applications/$a.app/"); do
+        echo "$SCAN" | /usr/bin/grep -qx "keep $pid" && continue
+        /usr/sbin/taskpolicy -b -p "$pid" 2>/dev/null && echo "$pid" >> "$ST/pids"
+      done
+    done < "$THROTTLE"
+  fi
+  [ "$THROTTLE_ON" = on ] && echo "$SCAN" | /usr/bin/awk '$1=="slow"{print $2}' | while read -r pid; do
+    /usr/sbin/taskpolicy -b -p "$pid" 2>/dev/null && echo "$pid" >> "$ST/pids"
+  done
+else
+  if [ -f "$ST/lpm" ]; then /usr/bin/pmset -a lowpowermode 0; /bin/rm -f "$ST/lpm"; fi
+  /bin/rm -f "$ST/lpm-user-off"
+  if [ -f "$ST/pids" ]; then
+    /usr/bin/sort -u "$ST/pids" | while read -r pid; do /usr/sbin/taskpolicy -B -p "$pid" 2>/dev/null; done
+    /bin/rm -f "$ST/pids"
+  fi
+fi
+
+# status snapshot for `swk status` (readable by the user)
+printf 'present=%s busy=%s want=%s at=%s\n' "${present:-0}" "${busy:-0}" "$want" "$(/bin/date +%s)" > "$ST/state"
+/bin/chmod 644 "$ST/state"
+
+if [ "$want" = 0 ] && /usr/sbin/ioreg -r -k AppleClamshellState -d 1 | /usr/bin/grep -q '"AppleClamshellState" = Yes'; then
+  /usr/bin/pmset sleepnow
+fi

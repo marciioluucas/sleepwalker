@@ -1,0 +1,363 @@
+#!/bin/bash
+# swk — sleepwalker: your Mac keeps working with the lid closed while your AI agent works.
+# https://github.com/marciioluucas/sleepwalker  ·  MIT
+set -euo pipefail
+
+VERSION="0.1.0"
+LABEL="dev.sleepwalker.daemon"
+SYS_DIR="/usr/local/libexec/sleepwalker"
+ROOT_HELPER="$SYS_DIR/sleepwalker-root"
+SUDOERS="/etc/sudoers.d/sleepwalker"
+SYS_STATE="/var/db/sleepwalker"
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/sleepwalker"
+CONF="$CONF_DIR/config"
+THROTTLE="$CONF_DIR/throttle.txt"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/sleepwalker"
+
+SELF="$(realpath "$0")"
+LIBEXEC="$(dirname "$SELF")/../libexec"
+
+KNOWN_AGENTS="claude codex gemini aider opencode cursor-agent amp goose"
+KNOWN_TERMINALS="Warp iTerm Terminal Ghostty kitty WezTerm Alacritty Hyper Tabby Visual Studio Code Cursor Zed"
+KNOWN_APPS="Claude ChatGPT Codex Cursor"
+
+# ---------- output ----------
+if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; N=$'\e[0m'; else B= D= G= Y= R= N=; fi
+info() { printf '%s\n' "$*"; }
+ok()   { printf '%s✓%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '%s!%s %s\n' "$Y" "$N" "$*" >&2; }
+die()  { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+
+# ---------- config ----------
+# key → type (onoff | num | name | name? = may be empty), default, help
+key_type() {
+  case "$1" in
+    agent) echo name ;; app|terminal) echo "name?" ;;
+    battery|low_power|throttle) echo onoff ;;
+    idle_min|battery_min|offline_grace|cpu_throttle|active_cpu) echo num ;;
+  esac
+}
+key_default() {
+  case "$1" in
+    agent) echo claude ;; battery) echo off ;; low_power|throttle) echo on ;;
+    idle_min) echo 30 ;; battery_min) echo 15 ;; offline_grace) echo 5 ;;
+    cpu_throttle) echo 20 ;; active_cpu) echo 0 ;;
+  esac
+}
+key_help() {
+  case "$1" in
+    agent) echo "agent CLI process name (claude, codex, gemini, aider…)" ;;
+    app) echo "desktop app the agent runs in, as in /Applications/<app>.app (empty = none)" ;;
+    terminal) echo "terminal app the agent runs in; never slowed down" ;;
+    battery) echo "stay awake on battery too (backpack mode)" ;;
+    low_power) echo "turn on Low Power Mode while held awake on battery" ;;
+    throttle) echo "slow down other apps/heavy processes while held awake on battery" ;;
+    idle_min) echo "minutes without agent activity before sleep comes back" ;;
+    battery_min) echo "never hold the Mac awake at or below this battery %" ;;
+    offline_grace) echo "minutes offline tolerated (time to hop to a hotspot)" ;;
+    cpu_throttle) echo "on battery, slow down other processes above this % CPU" ;;
+    active_cpu) echo "agent CPU % that counts as activity, for agents without hooks (0 = off)" ;;
+  esac
+}
+ORDER="agent app terminal battery low_power throttle idle_min battery_min offline_grace cpu_throttle active_cpu"
+
+validate() { # key value
+  local k=$1 v=$2
+  [ -n "$(key_type "$k")" ] || die "unknown key '$k' (see: swk config list)"
+  case "$(key_type "$k")" in
+    onoff) [[ "$v" =~ ^(on|off)$ ]] || die "$k must be on or off" ;;
+    num)   [[ "$v" =~ ^[0-9]+$ ]] || die "$k must be a whole number" ;;
+    name)  [[ "$v" =~ ^[A-Za-z0-9\ ._+-]+$ ]] || die "$k: use letters, numbers, spaces, . _ + -" ;;
+    name?) [[ "$v" =~ ^[A-Za-z0-9\ ._+-]*$ ]] || die "$k: use letters, numbers, spaces, . _ + -" ;;
+  esac
+}
+cfg_get() { local v; v=$(sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1); [ -n "$v" ] && echo "$v" || key_default "$1"; }
+cfg_set() {
+  validate "$1" "$2"; mkdir -p "$CONF_DIR"; touch "$CONF"
+  local tmp; tmp=$(mktemp); grep -v "^$1=" "$CONF" > "$tmp" || true
+  echo "$1=$2" >> "$tmp"; mv "$tmp" "$CONF"
+}
+cfg_unset() { [ -n "$(key_type "$1")" ] || die "unknown key '$1'"; [ -f "$CONF" ] || return 0; local tmp; tmp=$(mktemp); grep -v "^$1=" "$CONF" > "$tmp" || true; mv "$tmp" "$CONF"; }
+
+ensure_throttle_list() {
+  mkdir -p "$CONF_DIR"
+  [ -f "$THROTTLE" ] && return 0
+  cat > "$THROTTLE" <<'EOF'
+# Apps slowed down (background priority) while the Mac is held awake on battery.
+# Manage with: swk throttle add|remove|list. Your terminal and agent app are never slowed.
+Google Chrome
+Slack
+Discord
+Spotify
+Music
+Photos
+Microsoft Teams
+Microsoft Outlook
+WhatsApp
+OrbStack
+Docker
+IntelliJ IDEA
+GoLand
+WebStorm
+PyCharm
+EOF
+}
+
+# ---------- detection ----------
+running_app() { pgrep -f "/Applications/$1.app/" >/dev/null 2>&1; }
+detect_agent()    { for a in $KNOWN_AGENTS; do pgrep -x "$a" >/dev/null 2>&1 && { echo "$a"; return; }; done; echo claude; }
+detect_terminal() {
+  local IFS=$'\n'
+  for t in Warp iTerm Ghostty kitty WezTerm Alacritty Hyper Tabby "Visual Studio Code" Cursor Zed Terminal; do
+    running_app "$t" && { echo "$t"; return; }
+  done
+}
+detect_app() { for a in $KNOWN_APPS; do running_app "$a" && { echo "$a"; return; }; done; }
+
+ask() { # prompt default → answer
+  local a; printf '%s %s[%s]%s: ' "$1" "$D" "$2" "$N" >&2; read -r a </dev/tty || a=""; echo "${a:-$2}"
+}
+
+installed() { [ -x "$ROOT_HELPER" ] && [ -f "$SUDOERS" ]; }
+need_installed() { installed || die "not set up yet — run: swk setup"; }
+
+# ---------- commands ----------
+cmd_setup() {
+  local agent="" terminal="" app="" battery="" yes=0 hooks=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --agent) agent=$2; shift 2 ;;
+      --terminal) terminal=$2; shift 2 ;;
+      --app) app=$2; shift 2 ;;
+      --battery) battery=$2; shift 2 ;;
+      --claude-hooks) hooks=yes; shift ;;
+      --no-claude-hooks) hooks=no; shift ;;
+      -y|--yes) yes=1; shift ;;
+      -h|--help) help_setup; return ;;
+      *) die "unknown option '$1' (see: swk setup --help)" ;;
+    esac
+  done
+  [ -f "$LIBEXEC/sleepwalker-daemon" ] || die "can't find $LIBEXEC/sleepwalker-daemon"
+
+  info "${B}sleepwalker setup${N}"
+  local d_agent d_term d_app
+  d_agent=$(cfg_get agent); [ -f "$CONF" ] && grep -q '^agent=' "$CONF" || d_agent=$(detect_agent)
+  d_term=$(cfg_get terminal); [ -n "$d_term" ] || d_term=$(detect_terminal)
+  d_app=$(cfg_get app); [ -n "$d_app" ] || d_app=$(detect_app)
+  if [ $yes = 0 ] && [ -t 0 ]; then
+    [ -n "$agent" ]    || agent=$(ask "Agent CLI ($KNOWN_AGENTS)" "$d_agent")
+    [ -n "$terminal" ] || terminal=$(ask "Terminal you run it in (or 'none')" "${d_term:-none}")
+    [ -n "$app" ]      || app=$(ask "Desktop app, if you use one ($KNOWN_APPS, or 'none')" "${d_app:-none}")
+    [ -n "$battery" ]  || battery=$(ask "Stay awake on battery too? (on/off)" "$(cfg_get battery)")
+  fi
+  agent=${agent:-$d_agent}; terminal=${terminal:-${d_term:-none}}; app=${app:-${d_app:-none}}; battery=${battery:-$(cfg_get battery)}
+  [ "$terminal" = none ] && terminal=""; [ "$app" = none ] && app=""
+  cfg_set agent "$agent"; cfg_set terminal "$terminal"; cfg_set app "$app"; cfg_set battery "$battery"
+  # agents without hooks (anything but Claude Code, or a desktop app): detect activity by CPU
+  if { [ "$agent" != claude ] || [ -n "$app" ]; } && ! grep -q '^active_cpu=' "$CONF"; then cfg_set active_cpu 5; fi
+  ensure_throttle_list
+  mkdir -p "$STATE_DIR/holds"
+
+  info "Installing the root daemon (asks for your password once)…"
+  local daemon rule
+  daemon=$(mktemp); rule=$(mktemp)
+  sed -e "s|@HOME@|$HOME|" -e "s|@UID@|$(id -u)|" "$LIBEXEC/sleepwalker-daemon" > "$daemon"
+  bash -n "$daemon"
+  echo "$(id -un) ALL=(root) NOPASSWD: $ROOT_HELPER start, $ROOT_HELPER stop" > "$rule"
+  sudo install -d -o root -g wheel -m 755 "$SYS_DIR"
+  sudo install -o root -g wheel -m 755 "$daemon" "$SYS_DIR/sleepwalker-daemon"
+  sudo install -o root -g wheel -m 755 "$LIBEXEC/sleepwalker-root" "$ROOT_HELPER"
+  sudo visudo -cf "$rule" >/dev/null || die "sudoers rule failed validation"
+  sudo install -o root -g wheel -m 440 "$rule" "$SUDOERS"
+  rm -f "$daemon" "$rule"
+  sudo -n "$ROOT_HELPER" start
+  ok "daemon running — agent: $agent${terminal:+, terminal: $terminal}${app:+, app: $app}, battery: $battery"
+
+  if [ "$agent" = claude ] && [ "$hooks" != no ]; then
+    if [ "$hooks" = yes ] || { [ $yes = 0 ] && [ -t 0 ] && [[ "$(ask "Add Claude Code hooks to ~/.claude/settings.json? (y/n)" y)" =~ ^[yY] ]]; }; then
+      cmd_integrate claude
+    else
+      info "${D}tip: swk integrate claude${N}"
+    fi
+  fi
+  info "${D}next: swk status · swk config list · swk --help${N}"
+}
+
+cmd_start()   { need_installed; ensure_throttle_list; sudo -n "$ROOT_HELPER" start; ok "sleepwalker started"; }
+cmd_stop()    { need_installed; sudo -n "$ROOT_HELPER" stop; ok "sleepwalker stopped — normal sleep"; }
+cmd_restart() { cmd_stop >/dev/null; cmd_start; }
+
+cmd_status() {
+  local json=0; [ "${1:-}" = --json ] && json=1
+  local running=false; launchctl print "system/$LABEL" >/dev/null 2>&1 && running=true
+  local present=0 busy=0 want=0
+  [ -f "$SYS_STATE/state" ] && eval "$(grep -oE '(present|busy|want)=[0-9]+' "$SYS_STATE/state")"
+  local holds; holds=$(find "$STATE_DIR/holds" -type f -mmin -360 2>/dev/null | wc -l | tr -d ' ')
+  local idle=""; [ -f "$STATE_DIR/last-activity" ] && idle=$(( ($(date +%s) - $(stat -f %m "$STATE_DIR/last-activity")) / 60 ))
+  local power pct blocked lpm
+  power=$(pmset -g batt | grep -q "AC Power" && echo ac || echo battery)
+  pct=$(pmset -g batt | grep -o '[0-9]*%' | head -1 | tr -d %)
+  blocked=$(pmset -g | awk '/SleepDisabled/{print ($2==1?"true":"false")}')
+  lpm=$(pmset -g | awk '/lowpowermode/{print ($2==1?"true":"false")}')
+  local slowed=0; [ -f "$SYS_STATE/pids" ] && slowed=$(sort -u "$SYS_STATE/pids" | wc -l | tr -d ' ')
+  if [ $json = 1 ]; then
+    printf '{"version":"%s","installed":%s,"running":%s,"agent":"%s","app":"%s","terminal":"%s","agent_present":%s,"agent_working":%s,"idle_minutes":%s,"power":"%s","battery_percent":%s,"battery_mode":"%s","sleep_blocked":%s,"low_power_mode":%s,"processes_slowed":%s}\n' \
+      "$VERSION" "$(installed && echo true || echo false)" "$running" "$(cfg_get agent)" "$(cfg_get app)" "$(cfg_get terminal)" \
+      "$([ "$present" = 1 ] && echo true || echo false)" "$([ "$holds" -gt 0 ] && echo true || echo false)" "${idle:-null}" \
+      "$power" "${pct:-null}" "$(cfg_get battery)" "$blocked" "$lpm" "$slowed"
+    return
+  fi
+  installed || warn "not set up yet — run: swk setup"
+  info "${B}sleepwalker${N} $( $running && echo "${G}running${N}" || echo "${D}stopped${N}" )"
+  info "  agent        $(cfg_get agent)$([ -n "$(cfg_get app)" ] && echo " / $(cfg_get app) app")  $( [ "$present" = 1 ] && echo "${G}present${N}" || echo "${D}not running${N}")"
+  info "  activity     $([ "$holds" -gt 0 ] && echo "${G}working${N} ($holds session(s))" || echo "idle${idle:+ for ${idle} min} (sleeps after $(cfg_get idle_min))")"
+  info "  power        $power ${pct:+$pct%}  ·  battery mode $(cfg_get battery)"
+  info "  sleep        $([ "$blocked" = true ] && echo "${Y}blocked${N} (stays awake, lid closed too)" || echo "normal")"
+  [ "$power" = battery ] && info "  saver        low power $([ "$lpm" = true ] && echo on || echo off) · $slowed process(es) slowed"
+  return 0
+}
+
+cmd_config() {
+  local sub=${1:-list}; shift || true
+  case "$sub" in
+    list|ls)
+      for k in $ORDER; do
+        local v; v=$(cfg_get "$k"); local mark=""; grep -q "^$k=" "$CONF" 2>/dev/null || mark=" ${D}(default)${N}"
+        printf '  %-14s %-20s %s%s%s\n' "$k" "${v:--}" "$D" "$(key_help "$k")" "$N$mark"
+      done ;;
+    get) [ $# -eq 1 ] || die "usage: swk config get <key>"; [ -n "$(key_type "$1")" ] || die "unknown key '$1'"; cfg_get "$1" ;;
+    set) [ $# -ge 2 ] || die "usage: swk config set <key> <value>"; local k=$1; shift; cfg_set "$k" "$*"; ok "$k = $*" ;;
+    unset|reset) [ $# -eq 1 ] || die "usage: swk config unset <key>"; cfg_unset "$1"; ok "$1 back to default ($(key_default "$1"))" ;;
+    edit) mkdir -p "$CONF_DIR"; touch "$CONF"; "${EDITOR:-vi}" "$CONF" ;;
+    path) echo "$CONF" ;;
+    -h|--help) help_config ;;
+    *) die "unknown subcommand '$sub' (see: swk config --help)" ;;
+  esac
+}
+
+cmd_battery() {
+  case "${1:-}" in
+    on|off) cfg_set battery "$1"; ok "battery mode $1" ;;
+    "") cfg_get battery ;;
+    *) die "usage: swk battery [on|off]" ;;
+  esac
+}
+
+cmd_throttle() {
+  ensure_throttle_list
+  local sub=${1:-list}; shift || true
+  case "$sub" in
+    list|ls) grep -vE '^\s*(#|$)' "$THROTTLE" | sed 's/^/  /'; info "${D}throttle: $(cfg_get throttle) · above $(cfg_get cpu_throttle)% CPU any other process too${N}" ;;
+    add) [ $# -ge 1 ] || die "usage: swk throttle add <App Name>"; validate app "$*"; grep -qxF "$*" "$THROTTLE" || echo "$*" >> "$THROTTLE"; ok "added: $*" ;;
+    remove|rm) [ $# -ge 1 ] || die "usage: swk throttle remove <App Name>"; local tmp; tmp=$(mktemp); grep -vxF "$*" "$THROTTLE" > "$tmp" || true; mv "$tmp" "$THROTTLE"; ok "removed: $*" ;;
+    on|off) cfg_set throttle "$sub"; ok "throttle $sub" ;;
+    -h|--help) help_throttle ;;
+    *) die "unknown subcommand '$sub' (see: swk throttle --help)" ;;
+  esac
+}
+
+# called by agent hooks; Claude Code passes JSON with session_id on stdin
+session_id() { local s=""; [ -t 0 ] || s=$( (command -v jq >/dev/null && jq -r '.session_id // empty') 2>/dev/null || true); echo "${s:-manual}"; }
+cmd_hook() {
+  mkdir -p "$STATE_DIR/holds"
+  case "${1:-}" in
+    start) touch "$STATE_DIR/holds/$(session_id)" "$STATE_DIR/last-activity" ;;
+    stop)  rm -f "$STATE_DIR/holds/$(session_id)"; touch "$STATE_DIR/last-activity" ;;
+    *) die "usage: swk hook start|stop" ;;
+  esac
+}
+
+cmd_integrate() {
+  local target=${1:-} print=0; [ "${2:-}" = --print ] && print=1
+  [ "$target" = claude ] || die "usage: swk integrate claude [--print]   (other agents: see docs/other-agents.md)"
+  local bin; bin=$(command -v swk || echo "$SELF")
+  local snippet
+  snippet=$(cat <<EOF
+{"hooks":{
+  "UserPromptSubmit":[{"hooks":[{"type":"command","command":"$bin hook start 2>/dev/null || true","timeout":5}]}],
+  "Stop":[{"hooks":[{"type":"command","command":"$bin hook stop 2>/dev/null || true","timeout":5}]}],
+  "SessionEnd":[{"hooks":[{"type":"command","command":"$bin hook stop 2>/dev/null || true","timeout":5}]}]
+}}
+EOF
+)
+  if [ $print = 1 ]; then echo "$snippet" | jq .; return; fi
+  command -v jq >/dev/null || die "jq is required (brew install jq) — or use: swk integrate claude --print"
+  local f="$HOME/.claude/settings.json"; mkdir -p "$HOME/.claude"; [ -f "$f" ] || echo '{}' > "$f"
+  cp "$f" "$f.bak-sleepwalker"
+  # drop previous swk hooks, then append ours (idempotent)
+  jq --argjson s "$snippet" '
+    .hooks = (.hooks // {}) |
+    reduce ("UserPromptSubmit","Stop","SessionEnd") as $e (.;
+      .hooks[$e] = ([(.hooks[$e] // [])[] | select(([.hooks[]?.command] | map(test("swk hook")) | any) | not)] + $s.hooks[$e]))
+  ' "$f.bak-sleepwalker" > "$f"
+  ok "Claude Code hooks added to $f (backup: $f.bak-sleepwalker)"
+}
+
+cmd_uninstall() {
+  [ "${1:-}" = -y ] || [ "${1:-}" = --yes ] || { [[ "$(ask "Remove sleepwalker's daemon and sudoers rule? (y/n)" n)" =~ ^[yY] ]] || return 0; }
+  [ -x "$ROOT_HELPER" ] && sudo "$ROOT_HELPER" stop || true
+  sudo rm -rf "$SYS_DIR" "$SYS_STATE" "$SUDOERS"
+  ok "removed (config kept in $CONF_DIR; Claude hooks, if any, stay in ~/.claude/settings.json)"
+}
+
+# ---------- help ----------
+help_main() { cat <<EOF
+${B}swk${N} — sleepwalker $VERSION
+Keeps your Mac awake with the lid closed, only while your AI agent is working.
+
+${B}USAGE${N}
+  swk <command> [options]
+
+${B}COMMANDS${N}
+  setup                 Interactive setup: agent, terminal/app, daemon (asks password once)
+  start | stop | restart Start/stop the daemon (no password after setup)
+  status [--json]       What's happening right now
+  config <sub>          list · get <key> · set <key> <value> · unset <key> · edit · path
+  battery [on|off]      Stay awake on battery too (backpack mode)
+  throttle <sub>        list · add <App> · remove <App> · on · off
+  integrate claude      Add Claude Code hooks to ~/.claude/settings.json (--print to just show)
+  hook start|stop       Activity signal for agent hooks
+  uninstall [-y]        Remove the daemon and sudoers rule
+
+${B}OPTIONS${N}
+  -h, --help            Show help (also: swk <command> --help)
+  -v, --version         Show version
+
+${B}EXAMPLES${N}
+  swk setup --agent claude --terminal Warp --battery on
+  swk config set idle_min 45
+  swk throttle add "Adobe Photoshop"
+  swk status --json
+EOF
+}
+help_setup() { cat <<EOF
+${B}swk setup${N} [options]
+  --agent <name>       agent CLI process: $KNOWN_AGENTS
+  --terminal <app>     terminal you run it in, e.g. Warp, iTerm, Ghostty, Terminal ('none' to skip)
+  --app <app>          desktop app, e.g. $KNOWN_APPS ('none' to skip)
+  --battery on|off     stay awake on battery too
+  --claude-hooks       add Claude Code hooks without asking (--no-claude-hooks to skip)
+  -y, --yes            non-interactive: use detected values/defaults
+EOF
+}
+help_config() { echo "${B}swk config${N} list | get <key> | set <key> <value> | unset <key> | edit | path"; echo; for k in $ORDER; do printf '  %-14s %s (default: %s)\n' "$k" "$(key_help "$k")" "$(key_default "$k")"; done; }
+help_throttle() { echo "${B}swk throttle${N} list | add <App Name> | remove <App Name> | on | off"; echo "  Apps (as in /Applications/<App Name>.app) slowed down while held awake on battery."; }
+
+# ---------- main ----------
+cmd=${1:-}; shift || true
+case "$cmd" in
+  setup) cmd_setup "$@" ;;
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_restart ;;
+  status|st) cmd_status "$@" ;;
+  config|cfg) cmd_config "$@" ;;
+  battery) cmd_battery "$@" ;;
+  throttle) cmd_throttle "$@" ;;
+  integrate) cmd_integrate "$@" ;;
+  hook) cmd_hook "$@" ;;
+  uninstall) cmd_uninstall "$@" ;;
+  -v|--version|version) echo "swk $VERSION" ;;
+  ""|-h|--help|help) help_main ;;
+  *) die "unknown command '$cmd' (see: swk --help)" ;;
+esac

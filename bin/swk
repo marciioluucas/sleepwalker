@@ -4,7 +4,7 @@
 set -euo pipefail
 trap 'printf "\033[31merror:\033[0m swk stopped unexpectedly (line %s) — please report it\n" "$LINENO" >&2' ERR
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 LABEL="dev.sleepwalker.daemon"
 SYS_DIR="/usr/local/libexec/sleepwalker"
 ROOT_HELPER="$SYS_DIR/sleepwalker-root"
@@ -124,6 +124,13 @@ detect_terminal() {
 }
 detect_app() { for a in $KNOWN_APPS; do running_app "$a" && { echo "$a"; return; }; done; return 0; }
 
+# match an app name to /Applications, ignoring case ("claude" → "Claude")
+app_name() {
+  [ -n "$1" ] || return 0
+  local f; f=$(ls /Applications 2>/dev/null | grep -ixF "$1.app" | head -1 || true)
+  if [ -n "$f" ]; then echo "${f%.app}"; else warn "no /Applications/$1.app — keeping '$1' as typed"; echo "$1"; fi
+}
+
 ask() { # prompt default → answer
   local a; printf '%s %s[%s]%s: ' "$1" "$D" "$2" "$N" >&2; read -r a </dev/tty || a=""; echo "${a:-$2}"
 }
@@ -156,6 +163,8 @@ cmd_setup() {
   d_agent=$(cfg_get agent); [ -f "$CONF" ] && grep -q '^agent=' "$CONF" || d_agent=$(detect_agent)
   d_term=$(cfg_get terminal); [ -n "$d_term" ] || d_term=$(detect_terminal)
   d_app=$(cfg_get app); [ -n "$d_app" ] || d_app=$(detect_app)
+  # options given on the command line → don't ask about the rest
+  [ -n "$agent$terminal$app$battery$hotspot" ] && yes=1
   if [ $yes = 0 ] && [ -t 0 ]; then
     [ -n "$agent" ]    || agent=$(ask "Agent CLI ($KNOWN_AGENTS)" "$d_agent")
     [ -n "$terminal" ] || terminal=$(ask "Terminal you run it in (or 'none')" "${d_term:-none}")
@@ -165,6 +174,7 @@ cmd_setup() {
   fi
   agent=${agent:-$d_agent}; terminal=${terminal:-${d_term:-none}}; app=${app:-${d_app:-none}}; battery=${battery:-$(cfg_get battery)}
   [ "$terminal" = none ] && terminal=""; [ "$app" = none ] && app=""
+  terminal=$(app_name "$terminal"); app=$(app_name "$app")
   [ "$hotspot" = none ] && hotspot=""
   cfg_set agent "$agent"; cfg_set terminal "$terminal"; cfg_set app "$app"; cfg_set battery "$battery"
   [ -n "$hotspot" ] && cfg_set hotspot "$hotspot"

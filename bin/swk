@@ -32,10 +32,10 @@ die()  { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 # key → type (onoff | num | name | name? = may be empty), default, help
 key_type() {
   case "$1" in
-    agent) echo name ;; app|terminal) echo "name?" ;;
+    agent) echo name ;; app|terminal|hotspot) echo "name?" ;;
     battery|low_power|throttle) echo onoff ;;
     throttle_mode) echo mode ;;
-    idle_min|battery_min|offline_grace|cpu_throttle|active_cpu|temp_max|wake_grace) echo num ;;
+    idle_min|battery_min|offline_grace|cpu_throttle|active_cpu|temp_max|wake_grace|hotspot_after) echo num ;;
   esac
 }
 key_default() {
@@ -43,7 +43,7 @@ key_default() {
     agent) echo claude ;; battery) echo off ;; low_power|throttle) echo on ;;
     idle_min) echo 30 ;; battery_min) echo 15 ;; offline_grace) echo 5 ;;
     cpu_throttle) echo 20 ;; active_cpu) echo 0 ;;
-    throttle_mode) echo suspend ;; temp_max) echo 45 ;; wake_grace) echo 3 ;;
+    throttle_mode) echo suspend ;; temp_max) echo 45 ;; wake_grace) echo 3 ;; hotspot_after) echo 1 ;;
   esac
 }
 key_help() {
@@ -59,12 +59,14 @@ key_help() {
     wake_grace) echo "minutes after a wake before sleepwalker may put a closed Mac back to sleep" ;;
     idle_min) echo "minutes without agent activity before sleep comes back" ;;
     battery_min) echo "never hold the Mac awake at or below this battery %" ;;
-    offline_grace) echo "minutes offline tolerated (time to hop to a hotspot)" ;;
+    offline_grace) echo "minutes without internet tolerated before the Mac may sleep" ;;
+    hotspot) echo "Wi-Fi name of your phone's hotspot; joined when the internet drops (empty = off)" ;;
+    hotspot_after) echo "minutes without internet before joining the hotspot" ;;
     cpu_throttle) echo "on battery, slow down other processes above this % CPU" ;;
     active_cpu) echo "agent CPU % that counts as activity, for agents without hooks (0 = off)" ;;
   esac
 }
-ORDER="agent app terminal battery low_power throttle throttle_mode idle_min battery_min offline_grace cpu_throttle active_cpu temp_max wake_grace"
+ORDER="agent app terminal battery low_power throttle throttle_mode idle_min battery_min offline_grace hotspot hotspot_after cpu_throttle active_cpu temp_max wake_grace"
 
 validate() { # key value
   local k=$1 v=$2
@@ -129,13 +131,14 @@ need_installed() { installed || die "not set up yet — run: swk setup"; }
 
 # ---------- commands ----------
 cmd_setup() {
-  local agent="" terminal="" app="" battery="" yes=0 hooks=""
+  local agent="" terminal="" app="" battery="" hotspot="" yes=0 hooks=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --agent) agent=$2; shift 2 ;;
       --terminal) terminal=$2; shift 2 ;;
       --app) app=$2; shift 2 ;;
       --battery) battery=$2; shift 2 ;;
+      --hotspot) hotspot=$2; shift 2 ;;
       --claude-hooks) hooks=yes; shift ;;
       --no-claude-hooks) hooks=no; shift ;;
       -y|--yes) yes=1; shift ;;
@@ -155,10 +158,13 @@ cmd_setup() {
     [ -n "$terminal" ] || terminal=$(ask "Terminal you run it in (or 'none')" "${d_term:-none}")
     [ -n "$app" ]      || app=$(ask "Desktop app, if you use one ($KNOWN_APPS, or 'none')" "${d_app:-none}")
     [ -n "$battery" ]  || battery=$(ask "Stay awake on battery too? (on/off)" "$(cfg_get battery)")
+    [ -n "$hotspot" ]  || hotspot=$(ask "Your phone's hotspot Wi-Fi name, joined when the internet drops (or 'none')" "$(cfg_get hotspot | sed 's/^$/none/')")
   fi
   agent=${agent:-$d_agent}; terminal=${terminal:-${d_term:-none}}; app=${app:-${d_app:-none}}; battery=${battery:-$(cfg_get battery)}
   [ "$terminal" = none ] && terminal=""; [ "$app" = none ] && app=""
+  [ "$hotspot" = none ] && hotspot=""
   cfg_set agent "$agent"; cfg_set terminal "$terminal"; cfg_set app "$app"; cfg_set battery "$battery"
+  [ -n "$hotspot" ] && cfg_set hotspot "$hotspot"
   # agents without hooks (anything but Claude Code, or a desktop app): detect activity by CPU
   if { [ "$agent" != claude ] || [ -n "$app" ]; } && ! grep -q '^active_cpu=' "$CONF"; then cfg_set active_cpu 5; fi
   ensure_throttle_list
@@ -230,7 +236,7 @@ why_text() {
     ac|battery) echo "agent active" ;; display) echo "external display — macOS decides" ;;
     no-agent) echo "agent not running" ;; idle) echo "agent idle" ;;
     battery-mode-off) echo "on battery, battery mode off" ;; low-battery) echo "battery at or below $(cfg_get battery_min)%" ;;
-    offline) echo "offline for over $(cfg_get offline_grace) min" ;; thermal) echo "macOS thermal warning" ;;
+    offline) echo "no internet for over $(cfg_get offline_grace) min" ;; thermal) echo "macOS thermal warning" ;;
     hot) echo "battery at $(cfg_get temp_max)°C or more" ;; *) echo "$1" ;;
   esac
 }
@@ -374,6 +380,7 @@ ${B}swk setup${N} [options]
   --terminal <app>     terminal you run it in, e.g. Warp, iTerm, Ghostty, Terminal ('none' to skip)
   --app <app>          desktop app, e.g. $KNOWN_APPS ('none' to skip)
   --battery on|off     stay awake on battery too
+  --hotspot <name>     your phone's hotspot Wi-Fi name, joined when the internet drops
   --claude-hooks       add Claude Code hooks without asking (--no-claude-hooks to skip)
   -y, --yes            non-interactive: use detected values/defaults
 EOF

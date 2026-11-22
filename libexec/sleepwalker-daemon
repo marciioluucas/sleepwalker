@@ -43,6 +43,8 @@ THROTTLE_ON=$(cfg throttle on)
 THROTTLE_MODE=$(cfg throttle_mode suspend)
 TEMP_MAX=$(num temp_max 45)
 WAKE_GRACE=$(num wake_grace 3)
+HOTSPOT=$(cfg hotspot "")
+HOTSPOT_AFTER=$(num hotspot_after 1)
 # virtual machines lose time and drop connections when frozen: slow them down only
 NO_SUSPEND="OrbStack Docker UTM Parallels Desktop VMware Fusion VirtualBox"
 
@@ -50,9 +52,22 @@ now=$(/bin/date +%s)
 batt=$(/usr/bin/pmset -g batt)
 pct=$(echo "$batt" | /usr/bin/grep -o '[0-9]*%' | /usr/bin/head -1 | /usr/bin/tr -d %)
 on_ac() { echo "$batt" | /usr/bin/grep -q "AC Power"; }
+# online = the internet answers, not just "there is a route": a captive or dead
+# Wi-Fi (mall, hotel, bus) has a route and still drops the remote session
+internet() {
+  /sbin/route -n get default >/dev/null 2>&1 &&
+    /usr/bin/curl -s --max-time 4 http://captive.apple.com/hotspot-detect.html 2>/dev/null | /usr/bin/grep -q Success
+}
 online() {
-  if /sbin/route -n get default >/dev/null 2>&1; then /bin/rm -f "$ST/offline"; return 0; fi
+  if internet; then /bin/rm -f "$ST/offline"; return 0; fi
   [ -f "$ST/offline" ] || /usr/bin/touch "$ST/offline"
+  # no internet for a while: join your phone's hotspot (at most every 2 min)
+  if [ -n "$HOTSPOT" ] && /usr/bin/find "$ST/offline" -mmin +"$HOTSPOT_AFTER" | /usr/bin/grep -q . &&
+     ! /usr/bin/find "$ST/hotspot-try" -mmin -2 2>/dev/null | /usr/bin/grep -q .; then
+    /usr/bin/touch "$ST/hotspot-try"
+    wifi=$(/usr/sbin/networksetup -listallhardwareports | /usr/bin/awk '/Wi-Fi/{getline; print $2; exit}')
+    [ -n "$wifi" ] && /usr/sbin/networksetup -setairportnetwork "$wifi" "$HOTSPOT" >/dev/null 2>&1
+  fi
   ! /usr/bin/find "$ST/offline" -mmin +"$OFFLINE_GRACE" | /usr/bin/grep -q .
 }
 lid=0; /usr/sbin/ioreg -r -k AppleClamshellState -d 1 | /usr/bin/grep -q '"AppleClamshellState" = Yes' && lid=1
@@ -104,7 +119,7 @@ if [ "$ext" = 1 ]; then
 elif [ "$present" != 1 ]; then
   why=no-agent
 elif [ "$work" = 1 ] || recent; then
-  if on_ac; then want=1; why=ac
+  if on_ac; then want=1; why=ac; online || true   # still hops to the hotspot (car charger)
   elif [ "$BATTERY" != on ]; then why=battery-mode-off
   elif [ "${pct:-0}" -le "$BATTERY_MIN" ]; then why=low-battery
   elif ! online; then why=offline

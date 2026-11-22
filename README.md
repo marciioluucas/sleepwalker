@@ -1,6 +1,8 @@
-# 🌙 sleepwalker
+# 🌙 sleepwalker — keep your MacBook awake with the lid closed while your AI agent works
 
 **Close the lid. Your Mac keeps coding.**
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple) ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen) ![Shell](https://img.shields.io/badge/made%20with-bash-4EAA25?logo=gnubash&logoColor=white)
 
 `swk` keeps your MacBook awake — lid closed, in your backpack — **only while your AI coding agent is working**. You drive the agent from your phone while you're on the move; when it goes idle, sleep comes back on its own.
 
@@ -25,6 +27,17 @@ sleepwalker is wired to the agent itself:
 | Battery ≤ 15%, offline > 5 min, battery ≥ 45 °C, macOS thermal warning | lets the Mac sleep |
 | External display attached (desk, clamshell) | hands off — macOS decides, as usual |
 | You plug in / agent stops | every tweak is undone automatically |
+
+### sleepwalker vs. other keep-awake tools
+
+| | `caffeinate` | Keep-awake apps (Amphetamine, KeepingYouAwake, Caffeine…) | **sleepwalker** |
+|---|---|---|---|
+| Stays awake with the **lid closed** | no (unless on AC with an external display) | some, with extra setup | **yes**, on AC and on battery |
+| Turns itself on/off from **AI agent activity** | no | no — manual switch or timer | **yes** — hooks or agent CPU |
+| Lets the Mac sleep again when the agent goes idle | — | when the timer ends | **after `idle_min` minutes** |
+| Saves battery while awake (Low Power Mode, freezes other apps) | no | no | **yes**, never touching the agent |
+| Low battery / no internet / heat guards | no | battery only, in some | **yes** |
+| Can be toggled **from your phone** through the agent | no | no | **yes**, no password |
 
 ## Install
 
@@ -121,6 +134,29 @@ All set from the command line (`swk config set <key> <value>`), stored in `~/.co
 - **Heat.** A closed Mac in a bag can't breathe. The thermal guard covers extremes, but prefer light work on the move (specs, edits, reviews) over long builds.
 - **Signal.** No internet for more than `offline_grace` min (hotspot included) → the Mac sleeps and the remote session drops. Open the lid to resume.
 - macOS only. Tested on Apple Silicon, macOS 26.
+
+## FAQ
+
+**How do I keep my MacBook awake with the lid closed?**
+macOS sleeps a closed MacBook unless it's on AC with an external display. `pmset disablesleep 1` is the switch that overrides it; sleepwalker flips it for you — only while your AI agent is working — and flips it back when it goes idle.
+
+**Does `caffeinate` work with the lid closed?**
+No. `caffeinate` creates power assertions, which block idle sleep but not lid-close (clamshell) sleep on battery.
+
+**Can I use Claude Code from my phone with the Mac in my backpack?**
+Yes — that's what sleepwalker is for. Turn on Remote Control in the session (`/remote-control`), run `swk battery on`, close the lid. The [Claude Code guide](docs/claude-code.md) has the details.
+
+**Does it work with Codex, Gemini CLI, Aider, Cursor or OpenCode?**
+Yes. Any CLI agent or desktop app works: through hooks when the agent has them, or by watching the agent's CPU use. See [other agents](docs/other-agents.md).
+
+**Won't the Mac overheat in a bag?**
+sleepwalker lets it sleep when the battery reaches `temp_max` (45 °C by default) or macOS raises a thermal warning, and saves power while awake. In our measurements, a closed MacBook Air (M4) held awake by sleepwalker drew about 2.5 W, with the battery at ~31 °C — roughly 18 h of autonomy. Still: prefer light work on the move.
+
+**What happens when the Wi-Fi drops?**
+sleepwalker checks that the internet actually answers (a captive or dead Wi-Fi counts as offline), joins your phone's hotspot if you set `hotspot`, and lets the Mac sleep after `offline_grace` minutes without internet.
+
+**Is it safe to give it root?**
+Only a tiny helper runs as root, and a single sudoers line allows just `sleepwalker-root start|stop`. Zero third-party dependencies, and config is parsed as data, never executed. See [Security](#security).
 
 ## Uninstall
 

@@ -2,8 +2,9 @@
 # swk — sleepwalker: your Mac keeps working with the lid closed while your AI agent works.
 # https://github.com/marciioluucas/sleepwalker  ·  MIT
 set -euo pipefail
+trap 'printf "\033[31merror:\033[0m swk stopped unexpectedly (line %s) — please report it\n" "$LINENO" >&2' ERR
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 LABEL="dev.sleepwalker.daemon"
 SYS_DIR="/usr/local/libexec/sleepwalker"
 ROOT_HELPER="$SYS_DIR/sleepwalker-root"
@@ -79,7 +80,7 @@ validate() { # key value
     name?) [[ "$v" =~ ^[A-Za-z0-9\ ._+-]*$ ]] || die "$k: use letters, numbers, spaces, . _ + -" ;;
   esac
 }
-cfg_get() { local v; v=$(sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1); [ -n "$v" ] && echo "$v" || key_default "$1"; }
+cfg_get() { local v; v=$(sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1 || true); [ -n "$v" ] && echo "$v" || key_default "$1"; }
 cfg_set() {
   validate "$1" "$2"; mkdir -p "$CONF_DIR"; touch "$CONF"
   local tmp; tmp=$(mktemp); grep -v "^$1=" "$CONF" > "$tmp" || true
@@ -119,8 +120,9 @@ detect_terminal() {
   for t in Warp iTerm Ghostty kitty WezTerm Alacritty Hyper Tabby "Visual Studio Code" Cursor Zed Terminal; do
     running_app "$t" && { echo "$t"; return; }
   done
+  return 0
 }
-detect_app() { for a in $KNOWN_APPS; do running_app "$a" && { echo "$a"; return; }; done; }
+detect_app() { for a in $KNOWN_APPS; do running_app "$a" && { echo "$a"; return; }; done; return 0; }
 
 ask() { # prompt default → answer
   local a; printf '%s %s[%s]%s: ' "$1" "$D" "$2" "$N" >&2; read -r a </dev/tty || a=""; echo "${a:-$2}"
@@ -146,6 +148,7 @@ cmd_setup() {
       *) die "unknown option '$1' (see: swk setup --help)" ;;
     esac
   done
+  [ "$(id -u)" != 0 ] || die "run swk setup without sudo — it asks for your password when it needs it"
   [ -f "$LIBEXEC/sleepwalker-daemon" ] || die "can't find $LIBEXEC/sleepwalker-daemon"
 
   info "${B}sleepwalker setup${N}"

@@ -20,9 +20,10 @@ sleepwalker is wired to the agent itself:
 | Situation | What happens |
 |---|---|
 | Agent working, or active in the last 30 min — on AC | stays awake, lid open or closed |
-| Same, on battery, with battery mode on | stays awake **and saves power**: Low Power Mode, other apps and heavy processes slowed down. Whatever the agent started runs at full speed |
+| Same, on battery, with battery mode on | stays awake **and saves power**: Low Power Mode; chat/browser/music apps frozen between turns (lid closed), heavy processes slowed down. Whatever the agent started — and a browser it drives over CDP — runs at full speed |
 | Agent idle for 30 min | normal sleep returns; lid closed → sleeps right away |
-| Battery ≤ 15%, offline > 5 min, macOS thermal warning | lets the Mac sleep |
+| Battery ≤ 15%, offline > 5 min, battery ≥ 45 °C, macOS thermal warning | lets the Mac sleep |
+| External display attached (desk, clamshell) | hands off — macOS decides, as usual |
 | You plug in / agent stops | every tweak is undone automatically |
 
 ## Install
@@ -79,11 +80,14 @@ All set from the command line (`swk config set <key> <value>`), stored in `~/.co
 | `battery` | `off` | stay awake on battery too |
 | `low_power` | `on` | Low Power Mode while held awake on battery (turn it off by hand and swk respects it until the session ends) |
 | `throttle` | `on` | slow down other apps / heavy processes on battery |
+| `throttle_mode` | `suspend` | `suspend`: freeze the apps in the throttle list while the lid is closed and the agent is between turns (VMs like OrbStack/Docker are only slowed); `nice`: background priority only |
 | `idle_min` | `30` | minutes without activity before sleep comes back |
 | `battery_min` | `15` | never hold awake at or below this % |
 | `offline_grace` | `5` | minutes offline tolerated (time to hop to a hotspot) |
 | `cpu_throttle` | `20` | on battery, slow down other processes above this % CPU |
 | `active_cpu` | `0` | agent CPU % that counts as activity — for agents without hooks (`setup` sets 5 for them) |
+| `temp_max` | `45` | let the Mac sleep when the battery reaches this °C (`0` = off) |
+| `wake_grace` | `3` | minutes after a wake before swk may put a closed Mac back to sleep — lets a message from your phone land |
 
 ### On-the-move checklist
 
@@ -96,7 +100,8 @@ All set from the command line (`swk config set <key> <value>`), stored in `~/.co
 
 - A root `launchd` daemon runs every 10 s and flips `pmset disablesleep` — the only switch that beats lid-close sleep.
 - **Activity** comes from agent hooks (`swk hook start` / `swk hook stop`) or, for agents without hooks, from the agent's own CPU use.
-- **Battery saver**: Low Power Mode + `taskpolicy -b` (background priority) on the apps in your throttle list and on any other process above `cpu_throttle`% CPU. The agent's whole process tree, its parents, your terminal and the agent's app are never touched. Everything is reverted when the condition ends — Low Power Mode is only turned off if swk turned it on.
+- **Battery saver**: Low Power Mode; the apps in your throttle list are frozen (`SIGSTOP`, whole app at once) while the lid is closed and the agent is between turns, otherwise put at background priority (`taskpolicy -b`), like any other process above `cpu_throttle`% CPU. Never touched: the agent's process tree (including what it started earlier and left running), its parents, your terminal, the agent's app and any browser running with remote debugging (CDP automation). Opening the lid or the agent's next prompt unfreezes everything at once. Everything is reverted when the condition ends — Low Power Mode is only turned off if swk turned it on.
+- **Sleep**: swk only forces sleep on a Mac it was holding awake — never on a Mac on an external display, never within `wake_grace` minutes of a wake. `swk status` also warns when a phone is charging from the Mac on battery (≈5× the drain, measured).
 - The daemon is a root-owned copy in `/usr/local/libexec/sleepwalker`; it reads your config as plain validated values and never executes files from your home folder.
 
 ## Security

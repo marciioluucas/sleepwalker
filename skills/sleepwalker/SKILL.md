@@ -34,3 +34,5 @@ Reply in 1–3 short lines, before they go:
 
 - Prefer light work (edits, specs, reviews). Warn before a long build or test suite on battery: a closed Mac in a bag heats up and drains fast.
 - Work you leave running in the background after your turn ends doesn't count as activity; the Mac may sleep `idle_min` minutes later. For long jobs, keep the turn open or tell the user.
+- If `swk status` warns that a phone is connected by USB while on battery, tell the user: charging the phone from the Mac drains it about 5× faster.
+- Between your turns, with the lid closed, swk freezes chat/browser/music apps (`throttle_mode`). A browser you drive over CDP and anything you started stay untouched; if you need another app from the list, ask the user or `swk throttle remove "<App>"`.

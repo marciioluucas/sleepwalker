@@ -35,7 +35,10 @@ EOF
     if [ -f "$ST/pids" ]; then
       sort -u "$ST/pids" | while read -r pid; do taskpolicy -B -p "$pid" 2>/dev/null || true; done
     fi
-    rm -f "$ST/lpm" "$ST/lpm-user-off" "$ST/pids" "$ST/state"
+    if [ -f "$ST/stopped" ]; then
+      sort -u "$ST/stopped" | while read -r pid; do kill -CONT "$pid" 2>/dev/null || true; done
+    fi
+    rm -f "$ST/lpm" "$ST/lpm-user-off" "$ST/pids" "$ST/stopped" "$ST/tree-pids" "$ST/held" "$ST/state"
     ;;
   *) echo "usage: sleepwalker-root start|stop" >&2; exit 1 ;;
 esac

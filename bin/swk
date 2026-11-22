@@ -3,7 +3,7 @@
 # https://github.com/marciioluucas/sleepwalker  ·  MIT
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 LABEL="dev.sleepwalker.daemon"
 SYS_DIR="/usr/local/libexec/sleepwalker"
 ROOT_HELPER="$SYS_DIR/sleepwalker-root"
@@ -34,7 +34,8 @@ key_type() {
   case "$1" in
     agent) echo name ;; app|terminal) echo "name?" ;;
     battery|low_power|throttle) echo onoff ;;
-    idle_min|battery_min|offline_grace|cpu_throttle|active_cpu) echo num ;;
+    throttle_mode) echo mode ;;
+    idle_min|battery_min|offline_grace|cpu_throttle|active_cpu|temp_max|wake_grace) echo num ;;
   esac
 }
 key_default() {
@@ -42,6 +43,7 @@ key_default() {
     agent) echo claude ;; battery) echo off ;; low_power|throttle) echo on ;;
     idle_min) echo 30 ;; battery_min) echo 15 ;; offline_grace) echo 5 ;;
     cpu_throttle) echo 20 ;; active_cpu) echo 0 ;;
+    throttle_mode) echo suspend ;; temp_max) echo 45 ;; wake_grace) echo 3 ;;
   esac
 }
 key_help() {
@@ -52,6 +54,9 @@ key_help() {
     battery) echo "stay awake on battery too (backpack mode)" ;;
     low_power) echo "turn on Low Power Mode while held awake on battery" ;;
     throttle) echo "slow down other apps/heavy processes while held awake on battery" ;;
+    throttle_mode) echo "suspend = freeze throttle-list apps (lid closed, agent between turns); nice = background priority only" ;;
+    temp_max) echo "let the Mac sleep at this battery temperature in °C (0 = off)" ;;
+    wake_grace) echo "minutes after a wake before sleepwalker may put a closed Mac back to sleep" ;;
     idle_min) echo "minutes without agent activity before sleep comes back" ;;
     battery_min) echo "never hold the Mac awake at or below this battery %" ;;
     offline_grace) echo "minutes offline tolerated (time to hop to a hotspot)" ;;
@@ -59,13 +64,14 @@ key_help() {
     active_cpu) echo "agent CPU % that counts as activity, for agents without hooks (0 = off)" ;;
   esac
 }
-ORDER="agent app terminal battery low_power throttle idle_min battery_min offline_grace cpu_throttle active_cpu"
+ORDER="agent app terminal battery low_power throttle throttle_mode idle_min battery_min offline_grace cpu_throttle active_cpu temp_max wake_grace"
 
 validate() { # key value
   local k=$1 v=$2
   [ -n "$(key_type "$k")" ] || die "unknown key '$k' (see: swk config list)"
   case "$(key_type "$k")" in
     onoff) [[ "$v" =~ ^(on|off)$ ]] || die "$k must be on or off" ;;
+    mode)  [[ "$v" =~ ^(suspend|nice)$ ]] || die "$k must be suspend or nice" ;;
     num)   [[ "$v" =~ ^[0-9]+$ ]] || die "$k must be a whole number" ;;
     name)  [[ "$v" =~ ^[A-Za-z0-9\ ._+-]+$ ]] || die "$k: use letters, numbers, spaces, . _ + -" ;;
     name?) [[ "$v" =~ ^[A-Za-z0-9\ ._+-]*$ ]] || die "$k: use letters, numbers, spaces, . _ + -" ;;
@@ -190,8 +196,8 @@ cmd_restart() { cmd_stop >/dev/null; cmd_start; }
 cmd_status() {
   local json=0; [ "${1:-}" = --json ] && json=1
   local running=false; launchctl print "system/$LABEL" >/dev/null 2>&1 && running=true
-  local present=0 busy=0 want=0
-  [ -f "$SYS_STATE/state" ] && eval "$(grep -oE '(present|busy|want)=[0-9]+' "$SYS_STATE/state")"
+  local present=0 busy=0 want=0 why="" display=0 temp=0 usb_phone=0 slowed=0 frozen=0
+  [ -f "$SYS_STATE/state" ] && eval "$(grep -oE '(present|busy|want|display|temp|usb_phone|slowed|frozen)=[0-9]+|why=[a-z-]+' "$SYS_STATE/state")"
   local holds; holds=$(find "$STATE_DIR/holds" -type f -mmin -360 2>/dev/null | wc -l | tr -d ' ')
   local idle=""; [ -f "$STATE_DIR/last-activity" ] && idle=$(( ($(date +%s) - $(stat -f %m "$STATE_DIR/last-activity")) / 60 ))
   local power pct blocked lpm
@@ -199,12 +205,12 @@ cmd_status() {
   pct=$(pmset -g batt | grep -o '[0-9]*%' | head -1 | tr -d %)
   blocked=$(pmset -g | awk '/SleepDisabled/{print ($2==1?"true":"false")}')
   lpm=$(pmset -g | awk '/lowpowermode/{print ($2==1?"true":"false")}')
-  local slowed=0; [ -f "$SYS_STATE/pids" ] && slowed=$(sort -u "$SYS_STATE/pids" | wc -l | tr -d ' ')
   if [ $json = 1 ]; then
-    printf '{"version":"%s","installed":%s,"running":%s,"agent":"%s","app":"%s","terminal":"%s","agent_present":%s,"agent_working":%s,"idle_minutes":%s,"power":"%s","battery_percent":%s,"battery_mode":"%s","sleep_blocked":%s,"low_power_mode":%s,"processes_slowed":%s}\n' \
+    printf '{"version":"%s","installed":%s,"running":%s,"agent":"%s","app":"%s","terminal":"%s","agent_present":%s,"agent_working":%s,"idle_minutes":%s,"power":"%s","battery_percent":%s,"battery_mode":"%s","sleep_blocked":%s,"low_power_mode":%s,"processes_slowed":%s,"apps_frozen":%s,"reason":"%s","external_display":%s,"battery_temp_c":%s,"phone_on_usb":%s}\n' \
       "$VERSION" "$(installed && echo true || echo false)" "$running" "$(cfg_get agent)" "$(cfg_get app)" "$(cfg_get terminal)" \
       "$([ "$present" = 1 ] && echo true || echo false)" "$([ "$holds" -gt 0 ] && echo true || echo false)" "${idle:-null}" \
-      "$power" "${pct:-null}" "$(cfg_get battery)" "$blocked" "$lpm" "$slowed"
+      "$power" "${pct:-null}" "$(cfg_get battery)" "$blocked" "$lpm" "$slowed" "$frozen" "$why" \
+      "$([ "$display" = 1 ] && echo true || echo false)" "$temp" "$([ "$usb_phone" = 1 ] && echo true || echo false)"
     return
   fi
   installed || warn "not set up yet — run: swk setup"
@@ -212,9 +218,21 @@ cmd_status() {
   info "  agent        $(cfg_get agent)$([ -n "$(cfg_get app)" ] && echo " / $(cfg_get app) app")  $( [ "$present" = 1 ] && echo "${G}present${N}" || echo "${D}not running${N}")"
   info "  activity     $([ "$holds" -gt 0 ] && echo "${G}working${N} ($holds session(s))" || echo "idle${idle:+ for ${idle} min} (sleeps after $(cfg_get idle_min))")"
   info "  power        $power ${pct:+$pct%}  ·  battery mode $(cfg_get battery)"
-  info "  sleep        $([ "$blocked" = true ] && echo "${Y}blocked${N} (stays awake, lid closed too)" || echo "normal")"
-  [ "$power" = battery ] && info "  saver        low power $([ "$lpm" = true ] && echo on || echo off) · $slowed process(es) slowed"
+  info "  sleep        $([ "$blocked" = true ] && echo "${Y}blocked${N} (stays awake, lid closed too)" || echo "normal")${why:+  ${D}($(why_text "$why"))${N}}"
+  [ "$temp" -gt 0 ] && info "  battery temp ${temp}°C (sleeps at $(cfg_get temp_max))"
+  [ "$power" = battery ] && info "  saver        low power $([ "$lpm" = true ] && echo on || echo off) · $slowed process(es) slowed · $frozen frozen"
+  [ "$power" = battery ] && [ "$usb_phone" = 1 ] && warn "a phone is connected by USB — charging it from the Mac drains the battery ~5x faster"
   return 0
+}
+
+why_text() {
+  case "$1" in
+    ac|battery) echo "agent active" ;; display) echo "external display — macOS decides" ;;
+    no-agent) echo "agent not running" ;; idle) echo "agent idle" ;;
+    battery-mode-off) echo "on battery, battery mode off" ;; low-battery) echo "battery at or below $(cfg_get battery_min)%" ;;
+    offline) echo "offline for over $(cfg_get offline_grace) min" ;; thermal) echo "macOS thermal warning" ;;
+    hot) echo "battery at $(cfg_get temp_max)°C or more" ;; *) echo "$1" ;;
+  esac
 }
 
 cmd_config() {
@@ -265,7 +283,11 @@ session_id() {
 cmd_hook() {
   mkdir -p "$STATE_DIR/holds"
   case "${1:-}" in
-    start) touch "$STATE_DIR/holds/$(session_id)" "$STATE_DIR/last-activity" ;;
+    start)
+      touch "$STATE_DIR/holds/$(session_id)" "$STATE_DIR/last-activity"
+      # the agent is back: unfreeze apps now instead of waiting for the daemon
+      [ -r "$SYS_STATE/stopped" ] && while read -r pid; do kill -CONT "$pid" 2>/dev/null || true; done < "$SYS_STATE/stopped"
+      ;;
     stop)  rm -f "$STATE_DIR/holds/$(session_id)"; touch "$STATE_DIR/last-activity" ;;
     *) die "usage: swk hook start|stop" ;;
   esac

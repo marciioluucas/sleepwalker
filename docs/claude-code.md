@@ -5,7 +5,8 @@ The best fit: Claude Code hooks tell `swk` exactly when Claude starts and stops 
 ## 1. Install and set up
 
 ```bash
-brew install marciioluucas/tap/sleepwalker
+brew tap marciioluucas/tap && brew trust --formula marciioluucas/tap/sleepwalker
+brew install sleepwalker
 swk setup --agent claude --terminal Warp --claude-hooks   # use your terminal: iTerm, Ghostty, Terminal…
 ```
 

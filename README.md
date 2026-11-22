@@ -29,7 +29,9 @@ sleepwalker is wired to the agent itself:
 ## Install
 
 ```bash
-brew install marciioluucas/tap/sleepwalker
+brew tap marciioluucas/tap
+brew trust --formula marciioluucas/tap/sleepwalker   # Homebrew 7+ asks you to trust third-party formulae
+brew install sleepwalker
 swk setup
 ```
 

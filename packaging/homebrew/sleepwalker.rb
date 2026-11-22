@@ -3,8 +3,8 @@
 class Sleepwalker < Formula
   desc "Keep your Mac awake with the lid closed while your AI coding agent works"
   homepage "https://github.com/marciioluucas/sleepwalker"
-  url "https://github.com/marciioluucas/sleepwalker/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "REPLACE_WITH_TARBALL_SHA256"
+  url "https://github.com/marciioluucas/sleepwalker/archive/refs/tags/v0.2.0.tar.gz"
+  sha256 "69c863123ae01ba9e053fc38c18bbc44eea041f3553cf2ea64bf5e909ce35557"
   license "MIT"
 
   depends_on :macos
@@ -13,7 +13,7 @@ class Sleepwalker < Formula
     # swk finds the daemon at <prefix>/libexec, next to <prefix>/bin
     bin.install "bin/swk"
     libexec.install "libexec/sleepwalker-daemon", "libexec/sleepwalker-root"
-    (share/"sleepwalker").install "skills", "docs"
+    pkgshare.install "skills", "docs"
   end
 
   def caveats
@@ -23,7 +23,7 @@ class Sleepwalker < Formula
 
       Claude Code skill:
         mkdir -p ~/.claude/skills/sleepwalker
-        cp #{opt_share}/sleepwalker/skills/sleepwalker/SKILL.md ~/.claude/skills/sleepwalker/
+        cp #{opt_pkgshare}/skills/sleepwalker/SKILL.md ~/.claude/skills/sleepwalker/
 
       Before `brew uninstall sleepwalker`, run: swk uninstall
     EOS

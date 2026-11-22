@@ -3,8 +3,8 @@
 class Sleepwalker < Formula
   desc "Keep your Mac awake with the lid closed while your AI coding agent works"
   homepage "https://github.com/marciioluucas/sleepwalker"
-  url "https://github.com/marciioluucas/sleepwalker/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "69c863123ae01ba9e053fc38c18bbc44eea041f3553cf2ea64bf5e909ce35557"
+  url "https://github.com/marciioluucas/sleepwalker/archive/refs/tags/v0.2.1.tar.gz"
+  sha256 "e1eda9c7aeed4b9f6cbda505e9bc16ae36c0fb79b27d327d17a5ca5ebba1efec"
   license "MIT"
 
   depends_on :macos
